@@ -1,0 +1,47 @@
+# Recipe: Qwen 3.5 122B Hybrid
+# Qwen 3.5 122B Hybrid model with speculative MTP and FlashInfer attention
+recipe_version: "1"
+name: Qwen3.5-122B-Hybrid
+description: Qwen 3.5 122B Hybrid with speculative MTP, FlashInfer attention, and custom generation config
+
+# Only solo is supported
+cluster_only: false
+solo_only: true
+
+# Custom Container image to use
+container: vllm-qwen35-v2
+
+# Default settings (can be overridden via CLI or Launcher dashboard)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2 # Adjust based on the number of GPUs on your host
+  gpu_memory_utilization: 0.80
+  max_model_len: 196608
+  max_num_batched_tokens: 32768
+  served_model_name: Qwen3.5-122B-A10B
+
+# Environment variables
+# This mounts your local model cache folder inside the container's /models path
+env:
+  VLLM_SPARK_EXTRA_DOCKER_ARGS: "-v ~/.cache/huggingface/hub/models:/models"
+
+# The vLLM serve command template
+# Note: JSON curly braces are doubled ({{ }}) to escape python string formatting
+command: |
+  vllm serve /models/qwen35-122b-hybrid-int4fp8 \
+    --served-model-name {served_model_name} \
+    --port {port} \
+    --host {host} \
+    --max-model-len {max_model_len} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --load-format fastsafetensors \
+    --attention-backend FLASHINFER \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":2}}' \
+    --enable-chunked-prefill \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --generation-config auto \
+    --override-generation-config '{{"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 0.0, "repetition_penalty": 1.0}}' \
+    -tp {tensor_parallel} --distributed-executor-backend ray

@@ -1,0 +1,49 @@
+# Recipe: Qwen3.8-27B-NVFP4-DFlash
+# Qwen3.8-27B model in NVFP4 format with DFlash speculative decoding.
+
+recipe_version: "1"
+name: Qwen3.8-27B-NVFP4-DFlash
+description: vLLM serving Inferact/Qwen3.8-27B-NVFP4 with DFlash speculative decoding
+
+# HuggingFace model to download (optional, for --download-model)
+model: Inferact/Qwen3.8-27B-NVFP4
+
+# Container image to use
+container: vllm-node
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  gpu_memory_utilization: 0.7
+  max_model_len: 262144
+  max_num_seqs: 8
+  max_num_batched_tokens: 16384
+  served_model_name: Qwen3.8-27B
+  tensor_parallel: 2
+
+# Upstream vLLM PR to apply
+apply_vllm_prs:
+  - 52816
+
+# The vLLM serve command template
+command: |
+  vllm serve Inferact/Qwen3.8-27B-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --served-model-name {served_model_name} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size {tensor_parallel} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}}' \
+    --load-format instanttensor \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice

@@ -1,0 +1,52 @@
+# Recipe: InternScience/Agents-A1-FP8
+# Native FP8 checkpoint of InternScience's 35B MoE agentic model
+recipe_version: "1"
+name: Agents-A1-FP8
+description: vLLM serving InternScience/Agents-A1-FP8
+
+# HuggingFace model to download (optional, for --download-model)
+model: InternScience/Agents-A1-FP8
+
+# Fits on a single DGX Spark node (35B MoE, FP8 weights).
+cluster_only: false
+solo_only: true
+
+container: vllm-node
+
+# No mods — mods/fix-qwen3.5-chat-template is for Qwen3.5 checkpoints and
+# does not apply to Agents-A1. Confirmed: omitting it (plain docker run)
+# is part of why the working call succeeds where the recipe-launched one
+# died silently.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  max_model_len: 262144
+  served_model_name: Agents-A1-FP8
+
+env: {}
+
+# Matches the confirmed-working `docker run ... vllm serve` call exactly:
+# - no --load-format override (default loader; fastsafetensors was the
+#   likely OOM/silent-kill trigger on this model)
+# - no --attention-backend override (default backend; flashinfer was
+#   unconfirmed/untested for this combo)
+# - no --enable-prefix-caching, no --max-num-batched-tokens override
+# - no chat-template mod applied
+command: |
+  vllm serve InternScience/Agents-A1-FP8 \
+    --served-model-name {served_model_name} \
+    --host {host} \
+    --port {port} \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size {tensor_parallel} \
+    --max-model-len {max_model_len} \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder 
+
+
+#    --override-generation-config '{{"temperature":0.85,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":1.1,"repetition_penalty":1.0}}'
