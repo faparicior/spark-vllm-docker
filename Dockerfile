@@ -522,6 +522,12 @@ RUN set -eux; \
 # the fix (idempotent); unknown partial source shapes fail the build.
 COPY docker/patch_vllm_*.py docker/pin_cutlass_dsl.py /tmp/vllm-patches/
 
+# TEMPORARY PATCH: production changes from vLLM PR #58028. With --api-key,
+# require authentication outside the liveness allowlist and true CORS
+# preflights. Match code separately from docstring formatting so this supports
+# both upstream and B12X. Remove once supported refs include the upstream fix.
+RUN python3 /tmp/vllm-patches/patch_vllm_api_key_auth.py .
+
 # TEMPORARY PATCH: vLLM PR #53007 / d29c88f162a3 chooses a large SWA
 # kernel block even when the backend cannot run the primary block unsplit.
 # On FlashInfer SM12x, 64 does not divide Qwen3.8's 1648-token page, so
@@ -539,6 +545,14 @@ RUN python3 /tmp/vllm-patches/patch_vllm_swa_block_size.py .
 # speculator managers in the throwaway pool until the oldest supported ref has
 # the equivalent upstream fix.
 RUN python3 /tmp/vllm-patches/patch_vllm_mrv2_speculator_cudagraph_pool.py .
+
+# TEMPORARY PATCH: https://github.com/local-inference-lab/vllm/pull/865
+# B12X QSA PIECEWISE graphs can capture undersized cache tables and corrupt
+# cached continuations. Apply the pinned runtime PR diff only to the B12X
+# fork, before wheel compilation. Skip known equivalent upstream fixes;
+# missing/incompatible source or a failed patch must fail the build.
+COPY docker/vllm-qwen38-qsa-capture-pr865.patch /tmp/vllm-patches/
+RUN python3 /tmp/vllm-patches/patch_vllm_qwen38_qsa_capture.py . --repo "$VLLM_REPO"
 
 # TEMPORARY PATCH: local-inference-lab/vllm commit ad848fc41 added a dynamic
 # DeepSeek V4 C128A top-k width but omitted the alignment constant import.
