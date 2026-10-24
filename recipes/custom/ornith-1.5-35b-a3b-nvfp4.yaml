@@ -1,0 +1,99 @@
+# Recipe: Ornith-1.5-35B-A3B-NVFP4
+# Ornith-1.5-35B-A3B (35B-total / ~3B-active MoE coding/agent model, qwen3_5_moe
+# hybrid architecture with gated-deltanet linear_attn layers) in NVIDIA ModelOpt
+# mixed quantization: attention/linear_attn projections in FP8, routed + shared
+# experts and lm_head in NVFP4, MTP layers kept unquantized. ~21-22 GB of GPU
+# weights. MIT license.
+#
+# Quality note: significantly outperforms Qwen3.6-35B-A3B on coding/agentic
+# benchmarks (Terminal-Bench 2.1 67.8 vs 52.5, SWE-bench Verified 79 vs 73.4,
+# SWE-bench Pro 59.6 vs 49.5, NL2Repo 46.2 vs 29.4, DeepSWE 22 vs 0).
+#
+# Requirements / caveats:
+# - Needs a recent vLLM (official model card: vLLM >= 0.19.1, Transformers >= 5.8.1)
+#   and --trust-remote-code (custom modeling code in the checkpoint). The standard
+#   vllm-node build in this repo satisfies these.
+# - The official TP=2 / 2x80 GB serving recipe targets the BF16 checkpoint
+#   (~70 GB). This NVFP4 checkpoint needs only ~21-22 GB, so one DGX Spark is
+#   comfortable with big headroom for the 262K-context KV cache.
+# - The checkpoint ships its own chat_template.jinja, tokenizer and generation
+#   config, so no chat-template mod is applied.
+# - Reasoning model: assistant turns open with a  think block; the qwen3 reasoning
+#   parser surfaces it as reasoning_content. Keep the returned reasoning_content in
+#   conversation history.
+# - Recommended sampling (official card):
+#     general:        temperature 0.6, top_p 0.95, top_k 20
+#     reproduce evals: temperature 1.0
+#   Pass them from the client or use --override-generation-config.
+# - The checkpoint keeps MTP weights unquantized; MTP speculative decoding follows
+#   the same-family qwen3.6-35b-a3b-nvfp4 recipe (default 3 tokens). Remove the
+#   --speculative-config line to disable speculation entirely if acceptance rate
+#   looks poor on your workload.
+# - If loading OOMs, remove --load-format instanttensor to fall back to the
+#   standard safetensors loader.
+# - Context is 262144 natively; the card validates YaRN rope_scaling for ~1M
+#   tokens (add --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,
+#   "original_max_position_embeddings":262144}}' --max-model-len 1000000 plus
+#   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1, and size factor to the window you need).
+
+recipe_version: "1"
+name: Ornith-1.5-35B-A3B-NVFP4
+description: vLLM serving ornith-ai/Ornith-1.5-35B-A3B-NVFP4 (ModelOpt mixed FP8/NVFP4 hybrid MoE) on one DGX Spark with MTP speculation
+
+# HuggingFace model to download (optional, for --download-model)
+model: ornith-ai/Ornith-1.5-35B-A3B-NVFP4
+
+# Container image to use
+container: vllm-node
+
+# ~21 GB of weights: one DGX Spark with ample KV headroom; no cluster needed.
+solo_only: true
+
+# Checkpoint ships its own chat template; Qwen3.5 mods do not apply.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  num_speculative_tokens: 3
+  served_model_name: Ornith-1.5-35B-A3B
+
+# Environment variables
+env:
+  # Matches the other NVFP4-on-Marlin recipes in this repo.
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+# The vLLM serve command template.
+# Parsers follow the official model card (vLLM variant): qwen3_xml tools +
+# qwen3 reasoning. mamba-cache-mode align mirrors the repo's other hybrid
+# linear_attn recipes (glm-5.3-flash, qwen3.8-flash-next) so prefix caching
+# works with the gated-deltanet state.
+command: |
+  vllm serve ornith-ai/Ornith-1.5-35B-A3B-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --served-model-name {served_model_name} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --moe-backend marlin \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":{num_speculative_tokens},"draft_tensor_parallel_size":1}}' \
+    --load-format instanttensor \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice
