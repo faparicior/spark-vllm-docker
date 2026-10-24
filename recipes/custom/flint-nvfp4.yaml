@@ -1,0 +1,83 @@
+# Recipe: Recursive Flint NVFP4 (ModelOpt safetensors)
+# Community NVFP4 W4A4 quantization of RecursiveSI/flint (40B-A2.5B MoE for coding
+# agents) by FutureMLS-Lab, in standard NVIDIA ModelOpt NVFP4 format (routed
+# experts of MoE layers 2-48 are NVFP4; attention, routers, shared experts,
+# dense layers 0-1, embeddings and lm_head stay BF16). ~23.5 GB of weights.
+#
+# Requirements / caveats:
+# - The container's vLLM must include Flint architecture support
+#   (vllm-project/vllm PR #62938, merged 2026-10-22). This repo's default build
+#   (vllm-node, VLLM_REF=main) provides it. eugr/spark-vllm:latest
+#   (nightly-20261016) predates Flint and CANNOT serve this model; rebuild or
+#   wait for a newer nightly.
+# - This checkpoint was validated by its author on SGLang/B300, not on vLLM.
+#   Treat this recipe as experimental; the launch flags follow the official vLLM
+#   Flint recipe (recipes.vllm.ai/RecursiveSI/flint) adapted to the ModelOpt path.
+# - The checkpoint ships its own config.json, tokenizer, chat template and
+#   generation config, so no files are needed from the BF16 RecursiveSI/flint
+#   repo and no gguf package is required.
+# - Official sampling defaults: temperature 1.0, top_p 0.95, top_k 20 (they come
+#   from generation_config.json). Hard problems want >= 32768 output tokens.
+
+recipe_version: "1"
+name: Flint-NVFP4
+description: vLLM serving FutureMLS-Lab/flint-nvfp4-coldgptq (ModelOpt NVFP4 W4A4 MoE experts) with Marlin MoE backend
+
+# HuggingFace model to download (optional, for --download-model)
+model: FutureMLS-Lab/flint-nvfp4-coldgptq
+
+# Container image to use (must be built from a vLLM ref >= 2026-10-22 main)
+container: vllm-node
+
+# 23.5 GB of weights fit comfortably on a single DGX Spark; Flint's optimized
+# path is TP=1 and the official recipe does not validate TP>1.
+solo_only: true
+
+# No mods needed: no GGUF loader, no custom code in the checkpoint.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  # Documented context is 262144; 131072 is the conservative single-Spark
+  # default. Raise with --max-model-len 262144 after checking KV headroom.
+  max_model_len: 131072
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  served_model_name: flint
+
+# Environment variables
+env:
+  # Flint is not supported by vLLM's Rust frontend yet (it rejects the
+  # --exclude-tools-when-tool-choice-none flag); keep the Python frontend.
+  VLLM_USE_RUST_FRONTEND: 0
+  # Matches the other NVFP4-on-Marlin recipes in this repo.
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+# The vLLM serve command template.
+# Parsers follow the official Flint recipe: glm47 for both reasoning and tool
+# calls (deepseek_v3 is wrong for Flint: reasoning would stay in content).
+# FP8 KV cache is a DGX Spark memory choice; the official recipe validated
+# BF16 KV on GB200, so drop --kv-cache-dtype fp8 if output quality shifts.
+command: |
+  vllm serve FutureMLS-Lab/flint-nvfp4-coldgptq \
+    --host {host} \
+    --port {port} \
+    --served-model-name {served_model_name} \
+    --tensor-parallel-size {tensor_parallel} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --kv-cache-dtype fp8 \
+    --moe-backend marlin \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --exclude-tools-when-tool-choice-none
