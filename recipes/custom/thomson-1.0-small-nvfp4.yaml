@@ -1,0 +1,82 @@
+# Recipe: Thomson-1.0-Small-NVFP4
+# Thomson-1.0-Small (35B-total / ~3B-active MoE for legal, tax and journalism work,
+# qwen3_5_moe hybrid architecture with gated-deltanet linear_attn layers) in NVFP4.
+# The official thomsonreuters/Thomson-1.0-Small checkpoint is BF16 (~70 GB); this
+# repo is a third-party llm-compressor re-quant (compressed-tensors, nvfp4-pack,
+# W4A4 with fp8-e4m3 group-16 scales; routers, linear_attn projections and lm_head
+# left unquantized) at ~23 GB, so one DGX Spark is comfortable.
+#
+# Caveats worth knowing before you trust it:
+# - ProprietaryLegal/Thomson-1.0-Small-NVFP4 is NOT an official Thomson Reuters
+#   release and publishes no eval numbers. Spot-check it against the BF16 card
+#   before relying on it; cyankiwi/Thomson-1.0-Small-AWQ-INT4 is the alternative
+#   if this quant degrades noticeably.
+# - No MTP layers: text_config.mtp_num_hidden_layers is 0 in the official
+#   checkpoint too, so --speculative-config {"method":"mtp"} cannot work here
+#   (unlike the Ornith / Qwen3.6-35B recipes). Decode is plain autoregressive.
+# - Do not copy the ModelOpt flags from the sibling recipes: this checkpoint is
+#   quant_method=compressed-tensors, autodetected, so --quantization must stay out.
+# - MoE/linear/load backends are left on auto. The b12x image is used only for its
+#   recent vLLM + Transformers (needed for qwen3_5_moe on GB10). --moe-backend b12x
+#   and --load-format b12x are worth a speed A/B, but the b12x path is only
+#   validated for ModelOpt NVFP4, not for compressed-tensors nvfp4-pack.
+# - The checkpoint is natively multimodal (vision_config + image/video tokens).
+#   --language-model-only drops the (unquantized) ViT for text-only serving; remove
+#   it if you want image input, and then add --limit-mm-per-prompt.
+# - License: PolyForm Strict 1.0.0 (non-commercial) on both the base and the quant.
+# - Context is 262144 natively; YaRN can extend it (see the Ornith recipe notes).
+
+recipe_version: "1"
+name: Thomson-1.0-Small-NVFP4
+description: vLLM serving ProprietaryLegal/Thomson-1.0-Small-NVFP4 (llm-compressor NVFP4 hybrid MoE) on one DGX Spark
+
+# HuggingFace model to download (optional, for --download-model)
+model: ProprietaryLegal/Thomson-1.0-Small-NVFP4
+
+# Container image to use (recent vLLM + Transformers for qwen3_5_moe on GB10)
+container: vllm-node-b12x
+
+build_args:
+  - --exp-b12x
+
+# ~23 GB of weights: one DGX Spark with ample KV headroom; no cluster needed.
+solo_only: true
+
+# Checkpoint ships its own chat template; Qwen3.5 mods do not apply.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_seqs: 24
+  max_num_batched_tokens: 8192
+
+# The vLLM serve command template.
+# Parsers follow the shipped chat_template.jinja:  tool calls in XML
+# style +  think blocks. mamba-cache-mode align mirrors the repo's other hybrid
+# linear_attn recipes (ornith, glm-5.3-flash, qwen3.8-flash-next) so prefix caching
+# works with the gated-deltanet state.
+command: |
+  vllm serve ProprietaryLegal/Thomson-1.0-Small-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --language-model-only \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice
