@@ -1,0 +1,84 @@
+# Recipe: Qwen3.6-35B-A3B-NVFP4-Marlin-Solo
+# nvidia/Qwen3.6-35B-A3B-NVFP4 (ModelOpt NVFP4 hybrid MoE, qwen3_5_moe with
+# gated-deltanet linear_attn layers; 35B total / ~3B active) on ONE DGX Spark.
+#
+# This is the solo sibling of recipes/qwen3.6-35b-a3b-nvfp4.yaml, which is written
+# for a two-Spark Ray cluster (tensor_parallel 2, gpu_memory_utilization 0.4,
+# --distributed-executor-backend ray). Starting that one solo still works --
+# run-recipe.py forces tensor_parallel=1 in solo mode and the launcher drops the
+# ray executor -- but it keeps the cluster memory budget: ~48 GB of the ~121 GB
+# unified pool and 4 sequences for a ~21 GB checkpoint. Here the same model gets
+# 0.8 utilization and 24 sequences, like the ornith-1.5-35b-a3b-nvfp4 recipe
+# (same architecture and weight size).
+#
+# Notes:
+# - MoE stays on marlin for the quantized NVFP4 experts. The MTP drafter is kept
+#   unquantized (text_config.mtp_num_hidden_layers = 1) and declares its own
+#   "moe_backend":"triton" inside --speculative-config, because the draft would
+#   otherwise inherit marlin and abort with "not supported for unquantized MoE".
+#   Pair with recipes/qwen3.6-35b-a3b-nvfp4-no-mtp.yaml to A/B the speculation.
+# - --load-format fastsafetensors is what the cluster recipe uses; drop the flag
+#   for the plain safetensors loader (slower start, not broken).
+# - The checkpoint is natively multimodal (Qwen3_5MoeForConditionalGeneration);
+#   --language-model-only drops the vision tower for text-only serving. Remove it
+#   for image input and add --limit-mm-per-prompt.
+# - --mamba-cache-mode align (absent from the cluster recipe) is what the other
+#   hybrid linear_attn recipes use (ornith, glm-5.3-flash, qwen3.8-flash-next) so
+#   prefix caching stays correct with the gated-deltanet state.
+# - The checkpoint ships its own chat template, so no chat-template mod applies.
+#   Reasoning turns are surfaced as reasoning_content by the qwen3 parser.
+
+recipe_version: "1"
+name: Qwen3.6-35B-A3B-NVFP4-Marlin-Solo
+description: vLLM serving nvidia/Qwen3.6-35B-A3B-NVFP4 with Marlin MoE and MTP speculation on one DGX Spark
+
+# HuggingFace model to download (optional, for --download-model)
+model: nvidia/Qwen3.6-35B-A3B-NVFP4
+
+# Container image to use
+container: vllm-node
+
+# One Spark: ~21 GB of weights leaves plenty of the 128 GB pool for the KV cache.
+solo_only: true
+
+# Checkpoint ships its own chat template; no mods apply.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_seqs: 24
+  max_num_batched_tokens: 8192
+
+# Environment variables
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+# The vLLM serve command template
+command: |
+  vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --moe-backend marlin \
+    --language-model-only \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice
