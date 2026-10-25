@@ -24,9 +24,16 @@
 # - The checkpoint keeps MTP weights unquantized; MTP speculative decoding follows
 #   the same-family qwen3.6-35b-a3b-nvfp4 recipe (default 3 tokens). Remove the
 #   --speculative-config line to disable speculation entirely if acceptance rate
-#   looks poor on your workload. --moe-backend must stay b12x: the draft model
-#   inherits the target backend and marlin only accepts quantized MoE, so marlin
-#   aborts startup with "moe_backend='marlin' is not supported for unquantized MoE".
+#   looks poor on your workload. The draft inherits the target MoE backend, so it
+#   must be a backend that accepts unquantized MoE: --moe-backend marlin aborts at
+#   "Loading drafter model..." with "moe_backend='marlin' is not supported for
+#   unquantized MoE". Two ways to satisfy that:
+#     a) this recipe pins b12x globally (b12x is in the unquantized oracle's
+#        exemption list) -- what was actually booted and smoke-tested on GB10;
+#     b) the house pattern in recipes/qwen3.6-35b-a3b-nvfp4.yaml: keep
+#        --moe-backend marlin for the target and override the draft inside
+#        --speculative-config with "moe_backend":"triton". Use this as the fallback
+#        if the b12x path misbehaves on this checkpoint.
 # - --load-format b12x loads only the shards each run needs. Drop the flag to fall
 #   back to the standard safetensors loader. instanttensor is not usable in the b12x
 #   image (its 0.2.2 lacks _determine_buffer_size, which vLLM's weight_utils calls).
