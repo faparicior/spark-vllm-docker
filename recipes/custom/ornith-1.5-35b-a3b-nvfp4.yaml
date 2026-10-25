@@ -11,8 +11,10 @@
 #
 # Requirements / caveats:
 # - Needs a recent vLLM (official model card: vLLM >= 0.19.1, Transformers >= 5.8.1)
-#   and --trust-remote-code (custom modeling code in the checkpoint). The standard
-#   vllm-node build in this repo satisfies these.
+#   and --trust-remote-code (custom modeling code in the checkpoint), plus the
+#   GB10-native b12x kernels: use the vllm-node-b12x image (same as the
+#   qwen3.8-flash-next and qwen3.5-122b-nvfp4-mtp recipes). The plain vllm-node
+#   image has no b12x backend at all (MoEBackend has only flashinfer_b12x).
 # - The official TP=2 / 2x80 GB serving recipe targets the BF16 checkpoint
 #   (~70 GB). This NVFP4 checkpoint needs only ~21-22 GB, so one DGX Spark is
 #   comfortable with big headroom for the 262K-context KV cache.
@@ -25,12 +27,24 @@
 #     general:        temperature 0.6, top_p 0.95, top_k 20
 #     reproduce evals: temperature 1.0
 #   Pass them from the client or use --override-generation-config.
-# - The checkpoint keeps MTP weights unquantized; MTP speculative decoding follows
-#   the same-family qwen3.6-35b-a3b-nvfp4 recipe (default 3 tokens). Remove the
-#   --speculative-config line to disable speculation entirely if acceptance rate
-#   looks poor on your workload.
-# - If loading OOMs, remove --load-format instanttensor to fall back to the
-#   standard safetensors loader.
+# - The checkpoint keeps MTP weights unquantized, so the MoE backend must be valid
+#   for BOTH the NVFP4 target and the bf16 draft. --moe-backend marlin (and
+#   flashinfer_b12x) crashes at "Loading drafter model..." with
+#   "moe_backend='marlin' is not supported for unquantized MoE": b12x is the one
+#   value the unquantized oracle exempts (unquantized.py: not in
+#   ["auto","b12x","humming"]), so the target gets the NvFP4-native b12x path while
+#   the draft falls back to FlashInfer cutlass. Requires the Oct-15 b12x build or
+#   newer (older eugr/spark-vllm-b12x tags only exempt ["auto","humming"]).
+#   num_speculative_tokens stays at 3 to match qwen3.5-122b-nvfp4-mtp; note the
+#   checkpoint ships a single MTP layer, so n>1 replays that layer and community
+#   measurements on GB10 favour n=1 (93.8 / 83.1 / 70.8 tok/s for n=1/2/3).
+#   Drop --speculative-config entirely to disable speculation.
+# - Uses --load-format b12x, the loader shipped in the b12x image (same as the
+#   qwen3.8-flash-next recipes). Do NOT use instanttensor here: the b12x image
+#   pins instanttensor 0.2.2, which lacks the metadata layout that vLLM's
+#   index-aware path needs ("missing: _determine_buffer_size"), so it aborts
+#   during weight loading. Plain safetensors (drop --load-format) is the
+#   fallback if the b12x loader misbehaves; it is slower to start, not broken.
 # - Context is 262144 natively; the card validates YaRN rope_scaling for ~1M
 #   tokens (add --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,
 #   "original_max_position_embeddings":262144}}' --max-model-len 1000000 plus
@@ -43,13 +57,18 @@ description: vLLM serving ornith-ai/Ornith-1.5-35B-A3B-NVFP4 (ModelOpt mixed FP8
 # HuggingFace model to download (optional, for --download-model)
 model: ornith-ai/Ornith-1.5-35B-A3B-NVFP4
 
-# Container image to use
-container: vllm-node
+# Container image to use (b12x stack: GB10-native MoE/GDN kernels)
+container: vllm-node-b12x
+
+build_args:
+  - --exp-b12x
 
 # ~21 GB of weights: one DGX Spark with ample KV headroom; no cluster needed.
 solo_only: true
 
 # Checkpoint ships its own chat template; Qwen3.5 mods do not apply.
+# mods/instanttensor-hybrid-draft-loader is intentionally not used: it is a
+# no-op unless the primary loader is instanttensor, which this recipe avoids.
 mods: []
 
 # Default settings (can be overridden via CLI)
@@ -59,15 +78,23 @@ defaults:
   tensor_parallel: 1
   gpu_memory_utilization: 0.8
   max_model_len: 262144
-  max_num_seqs: 8
+  max_num_seqs: 24
   max_num_batched_tokens: 8192
   num_speculative_tokens: 3
-  served_model_name: Ornith-1.5-35B-A3B
 
-# Environment variables
+# CUTE_DSL_ARCH must be pinned for the CuTe DSL kernels on GB10 / SM121.
 env:
-  # Matches the other NVFP4-on-Marlin recipes in this repo.
-  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+  CUTE_DSL_ARCH: "sm_121a"
+  VLLM_USE_B12X_MOE: "1"
+  VLLM_USE_B12X_FP8_GEMM: "1"
+  VLLM_USE_B12X_WO_PROJECTION: "1"
+  VLLM_USE_B12X_MHC: "1"
+  VLLM_USE_AOT_COMPILE: "1"
+  VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_USE_FLASHINFER_SAMPLER: "1"
+  VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
 
 # The vLLM serve command template.
 # Parsers follow the official model card (vLLM variant): qwen3_xml tools +
@@ -78,12 +105,12 @@ command: |
   vllm serve ornith-ai/Ornith-1.5-35B-A3B-NVFP4 \
     --host {host} \
     --port {port} \
-    --served-model-name {served_model_name} \
     --tensor-parallel-size {tensor_parallel} \
     --trust-remote-code \
     --kv-cache-dtype fp8 \
     --attention-backend flashinfer \
-    --moe-backend marlin \
+    --moe-backend b12x \
+    --language-model-only \
     --mamba-cache-mode align \
     --gpu-memory-utilization {gpu_memory_utilization} \
     --max-model-len {max_model_len} \
@@ -93,7 +120,7 @@ command: |
     --async-scheduling \
     --enable-prefix-caching \
     --speculative-config '{{"method":"mtp","num_speculative_tokens":{num_speculative_tokens},"draft_tensor_parallel_size":1}}' \
-    --load-format instanttensor \
+    --load-format b12x \
     --reasoning-parser qwen3 \
     --tool-call-parser qwen3_xml \
     --enable-auto-tool-choice
