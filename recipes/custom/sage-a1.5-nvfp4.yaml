@@ -1,0 +1,109 @@
+# Recipe: Sage-A1.5-NVFP4
+# kvallespin/Sage-A1.5-NVFP4 (35B-total / ~3B-active MoE agentic model, qwen3_5_moe
+# hybrid architecture with gated-deltanet linear_attn layers) in NVIDIA ModelOpt
+# mixed quantization: NVFP4 (W4A4, group_size=16) on routed experts, FP8 E4M3 on
+# linear attention / full self-attention / shared experts / KV cache, BF16 on
+# embeddings, lm_head, routers and MTP layer (quantized_layers ignore mtp*).
+# ~24 GB on disk (3 shards), ~23 GB on GPU (with vision + MTP). Apache 2.0 license.
+#
+# Sage-A1.5 builds on Qwen3.6-35B-A3B and Agents-A1, adding agentic orchestration,
+# verification, and open scientific discovery capabilities. Based on Qwen3.6 backbone.
+#
+# Quality note: SOTA on multiple benchmarks among ~35B models including
+# GAIA 95.1, BrowseComp 81.7, SWE-bench Pro 61.2, PinchBench 90.0, OmniDocBench 91.5.
+# Outperforms Qwen3.6-35B-A3B and Agents-A1 on engineering and agentic tasks.
+#
+# This NVFP4 build (by kvallespin, quantized with NVIDIA Model Optimizer 0.47.0):
+# - ~24 GB on disk vs 72 GB BF16 original (34% of original size)
+# - ~1.9x faster decode than BF16 on GB10 (53.0 vs 28.3 tok/s)
+# - 96-99% top-1 agreement with BF16 on reasoning, tool calls, and answers
+# - No detectable loss on agentic next-action or IFEval
+# - BFCL tool-call accuracy only 2.1pp lower (95% CI -3.9 to -0.3)
+# - MTP layer is BF16, byte-identical to original (ignored by quantization)
+#
+# Requirements / caveats:
+# - Needs a recent vLLM nightly (official card: tested with 0.31.1rc1.dev88+) and
+#   --trust-remote-code (custom modeling code in the checkpoint).
+# - The checkpoint uses ModelOpt MIXED_PRECISION format, loaded with
+#   --quantization modelopt.
+# - ~23 GB of GPU weights (with vision + MTP): one DGX Spark (128 GB unified)
+#   leaves ~100 GB for the KV cache, huge headroom for 262K context.
+# - The checkpoint ships its own chat_template.jinja, tokenizer and generation
+#   config, so no chat-template mod is applied.
+# - Reasoning model: assistant turns open with a  think block; the qwen3 reasoning
+#   parser surfaces it as reasoning_content. Keep the returned reasoning_content in
+#   conversation history.
+# - Recommended sampling (official card):
+#     temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0
+#     presence_penalty: 1.5, repetition_penalty: 1.0
+#   Pass them from the client or use --override-generation-config.
+# - Context is 262144 natively; the official card tested 65536 at first.
+#   To extend to 512K use YaRN rope_scaling:
+#   --hf-overrides '{"text_config":{"rope_parameters":{"rope_type":"yarn",
+#   "rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,
+#   "original_max_position_embeddings":262144,"mrope_interleaved":true,
+#   "mrope_section":[11,11,10]}}}' --max-model-len 524288 -e
+#   VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+# - Sage-A1.5 is a vision-language model (Qwen3_5MoeForConditionalGeneration).
+#   Use --language-model-only for text-only serving to free ~0.9 GB KV cache.
+#   Remove it for image input and add --limit-mm-per-prompt.
+# - The official card recommends --compilation-config for CUDA graphs:
+#   --compilation-config '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+recipe_version: "1"
+name: Sage-A1.5-NVFP4
+description: vLLM serving kvallespin/Sage-A1.5-NVFP4 (ModelOpt mixed NVFP4/FP8 MoE) on one DGX Spark with MTP speculation
+
+# HuggingFace model to download (optional, for --download-model)
+model: kvallespin/Sage-A1.5-NVFP4
+
+# Container image to use (standard vLLM image)
+container: vllm-node
+
+# ~23 GB of weights: one DGX Spark with massive KV headroom; no cluster needed.
+solo_only: true
+
+# Checkpoint ships its own chat template; no mods apply.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.5
+  max_model_len: 65536
+  max_num_seqs: 4
+  max_num_batched_tokens: 4096
+  num_speculative_tokens: 3
+
+# The vLLM serve command template.
+# Parsers follow the official model card (vLLM variant): qwen3_coder tools +
+# qwen3 reasoning. mamba-cache-mode align mirrors the repo's other hybrid
+# linear_attn recipes (ornith, glm-5.3-flash, qwen3.8-flash-next) so prefix caching
+# works with the gated-deltanet state.
+# Note: --quantization modelopt replaces --moe-backend b12x (ModelOpt handles NVFP4).
+command: |
+  vllm serve kvallespin/Sage-A1.5-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --quantization modelopt \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --moe-backend cutlass \
+    --language-model-only \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":{num_speculative_tokens}}}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice
