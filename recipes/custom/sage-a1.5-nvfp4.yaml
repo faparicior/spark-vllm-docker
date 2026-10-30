@@ -49,6 +49,18 @@
 #   Remove it for image input and add --limit-mm-per-prompt.
 # - The official card recommends --compilation-config for CUDA graphs:
 #   --compilation-config '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+# - The MTP layer is BF16 (unquantized), so the global --moe-backend must also be
+#   valid for unquantized MoE. --moe-backend cutlass aborts at "Loading drafter
+#   model..." with "moe_backend='cutlass' is not supported for unquantized MoE.
+#   Expected one of ['triton', 'batched_triton', 'flashinfer_trtllm',
+#   'flashinfer_cutlass', 'aiter']" (vllm/model_executor/layers/fused_moe/
+#   oracle/unquantized.py). House pattern from recipes/qwen3.6-35b-a3b-nvfp4.yaml:
+#   keep cutlass for the NVFP4 target and give the draft its own backend via
+#   "moe_backend":"triton" inside --speculative-config.
+#   Verified on TARS (vllm-node 0.27.2rc1, Oct-30): target + draft load, chat
+#   completion and qwen3_coder tool calls work; MTP mean acceptance length 3.00,
+#   draft acceptance 66.7% (0.905 / 0.619 / 0.476 per position).
+#   Drop --speculative-config entirely to disable speculation.
 
 recipe_version: "1"
 name: Sage-A1.5-NVFP4
