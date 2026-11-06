@@ -1,0 +1,114 @@
+# Recipe: AREX-2-BF16
+# BAAI/AREX-2 (27B DENSE long-horizon self-improving agent, BAAI) — a
+# fine-tune of Qwen3.8-27B. Its text_config matches nvidia/Qwen3.8-27B-NVFP4
+# field-for-field: qwen3_5_text, 64 layers, hidden 5120, 24 q / 4 kv heads,
+# head_dim 256, intermediate 17408, gated attention (attn_output_gate, swish
+# output gate), partial_rotary_factor 0.25, vocab 248320. Hybrid attention:
+# gated-deltanet linear_attn layers (linear_conv_kernel_dim 4) with a full
+# attention layer every 4 (full_attention_interval 4) -> only 16 of 64 layers
+# carry KV. Native MTP layer (mtp_num_hidden_layers 1). Multimodal
+# (Qwen3_5ForConditionalGeneration + SigLIP-style vision tower, hidden 1152).
+# Native 262144 context. Apache 2.0. BF16 weights only: ~54 GB on disk
+# (11 shards); no public NVFP4/FP8 variant exists (checked Oct-30 on HF,
+# BAAI publishes only AREX-2 BF16, AREX-Turbo 4B and AREX-Base 122B).
+#
+# Quality note (official card): MLE-Lite 81.8 and Frontier-CS 70.7 at 27B
+# (above Kimi-K3 2.8T on MLE-Lite), BrowseComp 84.0, GAIA 92.2,
+# DeepSearchQA 93.8. Trained on ML/algorithmic tasks with verifiable
+# feedback; self-improvement behavior transfers to deep research.
+#
+# STATUS: authored Oct-30, NOT yet boot-tested (per request). Before testing,
+# confirm the serving image carries the repo's qwen3.8 patch series (GDN
+# linear_attn kernels, vllm+flashinfer) — same requirement as the sister
+# recipes qwen3.8-27b-nvfp4-dflash2.yaml and custom/qwen3.8-27b-nvfp4-dflash.yaml.
+# If the current local vllm-node image predates the GDN support, use a fresh
+# eugr/spark-vllm nightly (same unblock path as the Ripple recipe) or a build
+# with apply_vllm_prs, not a hand-rolled build.
+#
+# Requirements / caveats:
+# - Needs a vLLM with qwen3_5_text (Qwen3.8-class) support incl. the GDN
+#   linear_attn path, and --trust-remote-code (AutoMap to the checkpoint's
+#   modeling code). Transformers >= 5.8 per the card ("recent Transformers
+#   with Qwen3.8 support").
+# - Dense model: no --moe-backend and no unquantized-MoE drafter dance
+#   (cf. sage-a1.5-nvfp4 notes). The native MTP drafter is BF16 like the
+#   target, so nothing to exempt.
+# - MTP speculation follows the qwen3.5/3.6 house pattern (single shipped MTP
+#   layer; n>1 replays it). Community GB10 measurements for 1-layer MTP favor
+#   n=1; start with 1-3 and A/B. Drop --speculative-config to disable.
+#   Community alternative (untested): z-lab/Qwen3.8-27B-DFlash2 as a
+#   method=dflash drafter — same base and vocab (248320) as AREX-2, so it
+#   should load, but AREX's heavy agentic post-training may lower acceptance.
+# - KV is cheap because only 16/64 layers are full attention: 16 x 4 kv heads
+#   x 256 head_dim x 2 x 2 B = ~64 KB/token BF16, ~32 KB with --kv-cache-dtype
+#   fp8 (keep it; the qwen3.8 sisters use fp8 KV). Linear_attn state is
+#   per-sequence (mamba_ssm_dtype float32), not per-token.
+# - --language-model-only drops the vision tower (~1-2 GB) for text-only
+#   serving; remove it and add --limit-mm-per-prompt for image input.
+# - --mamba-cache-mode align mirrors the repo's hybrid linear_attn recipes
+#   (ornith, sage, glm-5.3-flash, qwen3.8-flash-next) so prefix caching stays
+#   correct with the gated-deltanet state.
+# - The checkpoint ships its own chat_template.jinja; no chat-template mod.
+#   Parsers follow the qwen3.8 sisters: qwen3 reasoning + qwen3_xml tools.
+# - ~54 GB weights on one DGX Spark (128 GB unified): at 0.8 utilization the
+#   remaining ~45 GB easily covers 262K-context KV (~8.5 GB at fp8 KV for the
+#   16 full-attn layers) + activations + CUDA graphs.
+# - Optional size cut if headroom ever matters: online --quantization fp8
+#   (weights ~27 GB) is untested on this GDN hybrid path; try it only as an
+#   experiment, not a default.
+
+recipe_version: "1"
+name: AREX-2-BF16
+description: vLLM serving BAAI/AREX-2 (27B dense Qwen3.8-class self-improving agent, BF16) on one DGX Spark with native MTP speculation
+
+# HuggingFace model to download (optional, for --download-model)
+model: BAAI/AREX-2
+
+# Container image to use (must carry the repo's qwen3.8 patch series)
+container: vllm-node
+
+cluster_only: false
+
+# Checkpoint ships its own chat template; dense model, no mods.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  num_speculative_tokens: 3
+
+# No special env on purpose; b12x knobs are MoE-only and this model is dense.
+env: {}
+
+# The vLLM serve command template.
+# Mirrors recipes/qwen3.8-27b-nvfp4-dflash2.yaml but with the native MTP
+# drafter (the checkpoint ships its own MTP layer) instead of DFlash2, and
+# no --moe-backend (dense).
+command: |
+  vllm serve BAAI/AREX-2 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --language-model-only \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":{num_speculative_tokens},"draft_tensor_parallel_size":1}}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice
