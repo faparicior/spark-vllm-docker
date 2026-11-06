@@ -1,0 +1,105 @@
+# Recipe: Ripple-65B-Preview-NVFP4
+# ricursiveAI/Ripple-65B-Preview-NVFP4 (65B DENSE transformer, RicursiveForCausalLM)
+# from Ricursive Intelligence. 80 layers, hidden 5120, 80 q-heads / 8 kv-heads,
+# head_dim 128, gated attention (g_proj), FFN activation clamping, PeriNorm,
+# hybrid attention: 4x sliding-window (1024) + 1x global NoPE per 5-layer group
+# (16 global layers). Native 2M context. Apache 2.0.
+# Quantization is ModelOpt NVFP4 (W4A4, group 16) on MLP only; attention,
+# embeddings, lm_head and routers stay BF16. 57.2 GB of weights on disk
+# (6 shards). No MoE -> no --moe-backend needed anywhere.
+#
+# Quality note: Terminal-Bench 2.1 80.5 (beats 501-975B open models), SWE-bench
+# Verified 76.5, SWE-bench Pro v2.0 Hard 79.1. Dense, so all 65B params active.
+#
+# STATUS / BLOCKER (verified Oct-30 on TARS):
+# - vLLM only learned RicursiveForCausalLM with upstream PR #65745, merged
+#   2026-11-05 17:36 UTC. No eugr prebuilt image contains it yet: the newest
+#   tag, eugr/spark-vllm:muse-spark (pushed 2026-11-05 20:47 UTC, vllm
+#   0.1.dev22954+ga34ca64c1), was built hours before the merge. Verified by
+#   inspecting its ModelRegistry: DFlash2DraftModel present, RicursiveForCausalLM
+#   absent. The NEXT eugr nightly (vllm main >= Nov-5 17:36 UTC) will work with
+#   this recipe unchanged. Do not run it on images older than that: the target
+#   arch will simply not be recognized.
+# - Drafters: use ricursiveAI/Ripple-65B-Preview-DFlash2 (DFlash2DraftModel,
+#   4.04B BF16, block_size 16, selector top-k 32 rank 256, taps target layers
+#   1/20/39/58/77). vLLM maps it to qwen3_dflash2 (upstream PR #52816, merged
+#   2026-08-21), so dflash2 support is already in the eugr images; only the
+#   target side is missing. num_speculative_tokens 15 = block 16 minus anchor,
+#   mirroring recipes/qwen3.6-35b-a3b-fp8-dflash.yaml. Drop
+#   --speculative-config to run without speculation.
+# - KV cache must stay BF16: the checkpoint ships no kv_cache_scheme and the
+#   vendor's Spark reference explicitly rejects quantized KV configs. Do NOT
+#   add --kv-cache-dtype fp8.
+# - Memory budget on one DGX Spark (128 GB unified): ~57.2 GB target weights
+#   + ~8.1 GB BF16 drafter + activations/CUDA graphs. Global-layer KV is
+#   16 layers x 8 kv-heads x 128 head_dim x 2 x 2 B = 64 KB/token, so 128K
+#   context costs ~8.6 GB (sliding layers are window-capped). 0.8 utilization
+#   leaves comfortable headroom; max_model_len 131072 mirrors the vendor's
+#   Spark example (their run used context 131072). Can be raised; 2M is native.
+# - Ripple decides per turn whether to reason: reasoning_content may be empty
+#   on direct answers. Both parsers are new: --reasoning-parser ripple and
+#   --tool-call-parser ripple (per https://recipes.vllm.ai/ricursiveAI/).
+# - Vendor alternative (no vLLM): the HF repo ships inference/local/spark.py,
+#   an SGLang-based DGX Spark engine (DFLASH algorithm, BF16 KV, SM121 PDL
+#   softmax NaN workaround). Only relevant if staying on vLLM becomes blocked.
+# - Recommended sampling per vendor notebook: temperature 0 for eval-like runs;
+#   chat_template_kwargs {"clear_thinking": false} to keep reasoning turns.
+# - No mods: the checkpoint ships its own chat_template.jinja and tokenizer,
+#   and dense NVFP4 MLPs need none of the b12x/MoE workarounds.
+
+recipe_version: "1"
+name: Ripple-65B-Preview-NVFP4
+description: vLLM serving ricursiveAI/Ripple-65B-Preview-NVFP4 (dense 65B, ModelOpt NVFP4 MLPs) on one DGX Spark with DFlash2 speculation
+
+# HuggingFace model to download (optional, for --download-model)
+model: ricursiveAI/Ripple-65B-Preview-NVFP4
+
+# Requires a vLLM build containing upstream PR #65745 (Ripple support,
+# merged 2026-11-05 17:36 UTC). eugr publishes this stack as spark-vllm
+# nightlies; retag or use -t eugr/spark-vllm:<nightly>=Nov-6+ when testing.
+container: eugr/spark-vllm:latest
+
+# ~57 GB of weights + ~8 GB drafter: fits one DGX Spark with KV headroom.
+solo_only: true
+
+# Checkpoint ships its own chat template; dense model, no MoE mods.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 131072
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  num_speculative_tokens: 15
+
+# No special env on purpose: BF16 KV is the default; b12x knobs are MoE-only
+# and this model is dense.
+env: {}
+
+# The vLLM serve command template.
+# Parsers follow https://recipes.vllm.ai/ricursiveAI/Ripple-65B-Preview:
+# reasoning-parser ripple + tool-call-parser ripple. No --quantization flag:
+# vLLM auto-detects the ModelOpt config. No --kv-cache-dtype: keep BF16 KV.
+command: |
+  vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --attention-backend flashinfer \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":{num_speculative_tokens}}}' \
+    --load-format fastsafetensors \
+    --reasoning-parser ripple \
+    --tool-call-parser ripple \
+    --enable-auto-tool-choice
