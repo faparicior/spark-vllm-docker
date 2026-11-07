@@ -17,28 +17,51 @@
 # DeepSearchQA 93.8. Trained on ML/algorithmic tasks with verifiable
 # feedback; self-improvement behavior transfers to deep research.
 #
-# STATUS: authored Oct-30, NOT yet boot-tested (per request). Before testing,
-# confirm the serving image carries the repo's qwen3.8 patch series (GDN
-# linear_attn kernels, vllm+flashinfer) — same requirement as the sister
-# recipes qwen3.8-27b-nvfp4-dflash2.yaml and custom/qwen3.8-27b-nvfp4-dflash.yaml.
-# If the current local vllm-node image predates the GDN support, use a fresh
-# eugr/spark-vllm nightly (same unblock path as the Ripple recipe) or a build
-# with apply_vllm_prs, not a hand-rolled build.
+# STATUS (verified Nov-7 on TARS):
+# - Unblock confirmed: the earlier image predating Qwen3.8/GDN support is no
+#   longer the blocker. vllm-node:latest (vllm
+#   0.33.0rc1.dev1016+g06129ab02.d20261107, transformers 5.22.2) resolves the
+#   checkpoint to Qwen3_5ForConditionalGeneration, loads all 11 BF16 shards in
+#   ~13 s with --load-format fastsafetensors, picks the FlashInfer GDN prefill
+#   kernel + cuda GDN spec-decode kernel, FLASHINFER attention and fp8 KV, and
+#   enters text-only mode thanks to --language-model-only.
+# - THE CHECKPOINT HAS NO MTP WEIGHTS. config.json still declares
+#   text_config.mtp_num_hidden_layers = 1 (inherited from Qwen3.8-27B), but
+#   BAAI published none of the mtp.* tensors: the safetensors index has 1184
+#   keys and zero matching "mtp"/"pre_fc", while the base
+#   nvidia/Qwen3.8-27B-NVFP4 has 2194 keys including mtp.fc.weight,
+#   mtp.layers.0.* and mtp.pre_fc_norm_{embedding,hidden}.weight. So
+#   --speculative-config {"method":"mtp",...} loads the target fine and then
+#   dies building the Qwen3_5MTP draft head:
+#     ValueError: Following weights were not initialized from checkpoint:
+#     {'model.pre_fc_norm_hidden.weight', 'model.pre_fc_norm_embedding.weight',
+#      'model.norm.weight', 'model.layers.0.*_layernorm.weight',
+#      'model.layers.0.self_attn.{q,k}_norm.weight'}
+#   This is a missing-weights problem in the checkpoint, not a vLLM bug: do
+#   not re-add the MTP flag. Any image at or newer than the Nov-6 nightly
+#   works with this recipe unchanged.
 #
 # Requirements / caveats:
 # - Needs a vLLM with qwen3_5_text (Qwen3.8-class) support incl. the GDN
 #   linear_attn path, and --trust-remote-code (AutoMap to the checkpoint's
 #   modeling code). Transformers >= 5.8 per the card ("recent Transformers
-#   with Qwen3.8 support").
+#   with Qwen3.8 support"); the Nov-6+ vllm-node nightlies ship 5.22.2.
 # - Dense model: no --moe-backend and no unquantized-MoE drafter dance
-#   (cf. sage-a1.5-nvfp4 notes). The native MTP drafter is BF16 like the
-#   target, so nothing to exempt.
-# - MTP speculation follows the qwen3.5/3.6 house pattern (single shipped MTP
-#   layer; n>1 replays it). Community GB10 measurements for 1-layer MTP favor
-#   n=1; start with 1-3 and A/B. Drop --speculative-config to disable.
-#   Community alternative (untested): z-lab/Qwen3.8-27B-DFlash2 as a
-#   method=dflash drafter — same base and vocab (248320) as AREX-2, so it
-#   should load, but AREX's heavy agentic post-training may lower acceptance.
+#   (cf. sage-a1.5-nvfp4 notes).
+# - No speculative decoding by default, because of the missing MTP weights
+#   above. Decode is plain autoregressive. If you want speculation, the only
+#   realistic drafter is the family DFlash2 head trained on the same base and
+#   vocab (248320): download z-lab/Qwen3.8-27B-DFlash2 and append it to the
+#   recipe launch (extra args after -- win over earlier duplicates, so pass
+#   it verbatim):
+#     ./run-recipe.sh recipes/custom/arex-2-bf16.yaml --solo -- \
+#       --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":8,"draft_tensor_parallel_size":1}'
+#   UNTESTED here: the DFlash2 head was trained on stock Qwen3.8-27B, so
+#   AREX's heavy agentic post-training may lower the acceptance rate; A/B the
+#   throughput before keeping it. num_speculative_tokens 8 mirrors
+#   recipes/qwen3.8-27b-nvfp4-dflash2.yaml. Pointing method=mtp at the base
+#   repo's mtp.* head is not recommended: the draft head would come from a
+#   differently-tuned (and NVFP4-quantized) model.
 # - KV is cheap because only 16/64 layers are full attention: 16 x 4 kv heads
 #   x 256 head_dim x 2 x 2 B = ~64 KB/token BF16, ~32 KB with --kv-cache-dtype
 #   fp8 (keep it; the qwen3.8 sisters use fp8 KV). Linear_attn state is
@@ -47,7 +70,10 @@
 #   serving; remove it and add --limit-mm-per-prompt for image input.
 # - --mamba-cache-mode align mirrors the repo's hybrid linear_attn recipes
 #   (ornith, sage, glm-5.3-flash, qwen3.8-flash-next) so prefix caching stays
-#   correct with the gated-deltanet state.
+#   correct with the gated-deltanet state. Kept for consistency, but it is a
+#   no-op on the verified build: vLLM warns that the flag is deprecated
+#   (removed in v0.34) and already selects align for
+#   Qwen3_5ForConditionalGeneration when --enable-prefix-caching is on.
 # - The checkpoint ships its own chat_template.jinja; no chat-template mod.
 #   Parsers follow the qwen3.8 sisters: qwen3 reasoning + qwen3_xml tools.
 # - ~54 GB weights on one DGX Spark (128 GB unified): at 0.8 utilization the
@@ -59,7 +85,7 @@
 
 recipe_version: "1"
 name: AREX-2-BF16
-description: vLLM serving BAAI/AREX-2 (27B dense Qwen3.8-class self-improving agent, BF16) on one DGX Spark with native MTP speculation
+description: vLLM serving BAAI/AREX-2 (27B dense Qwen3.8-class self-improving agent, BF16) on one DGX Spark
 
 # HuggingFace model to download (optional, for --download-model)
 model: BAAI/AREX-2
@@ -81,15 +107,17 @@ defaults:
   max_model_len: 262144
   max_num_seqs: 8
   max_num_batched_tokens: 8192
-  num_speculative_tokens: 3
+  # No num_speculative_tokens: the checkpoint ships no MTP weights (see the
+  # STATUS note), so the default command runs without --speculative-config.
 
 # No special env on purpose; b12x knobs are MoE-only and this model is dense.
 env: {}
 
 # The vLLM serve command template.
-# Mirrors recipes/qwen3.8-27b-nvfp4-dflash2.yaml but with the native MTP
-# drafter (the checkpoint ships its own MTP layer) instead of DFlash2, and
-# no --moe-backend (dense).
+# Mirrors recipes/qwen3.8-27b-nvfp4-dflash2.yaml minus --moe-backend (dense)
+# and minus speculation: AREX-2 publishes no MTP tensors, so the native MTP
+# drafter cannot be built (see the STATUS note). Add the DFlash2 drafter by
+# hand if you want speculation.
 command: |
   vllm serve BAAI/AREX-2 \
     --host {host} \
@@ -107,7 +135,6 @@ command: |
     --enable-chunked-prefill \
     --async-scheduling \
     --enable-prefix-caching \
-    --speculative-config '{{"method":"mtp","num_speculative_tokens":{num_speculative_tokens},"draft_tensor_parallel_size":1}}' \
     --load-format fastsafetensors \
     --reasoning-parser qwen3 \
     --tool-call-parser qwen3_xml \
