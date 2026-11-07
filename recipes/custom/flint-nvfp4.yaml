@@ -86,7 +86,6 @@ defaults:
   #   # FutureMLS-Lab/flint-nvfp4-coldgptq (served as: flint)").
   # llama-benchy 0.3.5 has no --exact-tg flag; check the version you are on.
   served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
-  served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
 
 # Environment variables
 env:
