@@ -60,32 +60,34 @@ defaults:
   max_model_len: 131072
   max_num_seqs: 8
   max_num_batched_tokens: 8192
-  # Two served names (vLLM --served-model-name takes a list and answers to
-  # any of them):
-  #   1. flint  - the generic client/metrics name, free of the quantization
-  #      and repackager tags of the checkpoint id; this is also what the
-  #      official https://recipes.vllm.ai/RecursiveSI/flint examples use.
-  #   2. the exact HF repo id - required for the sparkrun dashboard, whose
-  #      bench launcher (sparkrun/benchmarking/llama_benchy.py) always passes
-  #      "--model <repo id>" and never "--served-model-name", while
-  #      llama-benchy defaults the request model to --model
-  #      (src/llama_benchy/config.py). Serving only "flint" made that path
-  #      fail with: NotFoundError: The model
-  #      `FutureMLS-Lab/flint-nvfp4-coldgptq` does not exist. Valid aliases:
-  #      flint. Keep both unless that launcher learns to read /v1/models.
+  # Single generic served name: the checkpoint id carries the quantization
+  # and the repackager (FutureMLS-Lab/...-nvfp4-coldgptq), which is noise for
+  # clients, benchmarks and Prometheus metrics, and "flint" matches the
+  # official https://recipes.vllm.ai/RecursiveSI/flint examples too.
   #
-  # Bench notes (llama-benchy, not vllm bench serve): --model is the HF id
-  # used for the tokenizer, --served-model-name is the name sent in requests.
-  # With both names served, either of these works:
+  # The naming authority is the dashboard: ai-models-launcher's
+  # config/model-mappings.json has a "flint.*" rule resolving to
+  # servedModelName "flint", which makes it (a) append
+  # "-- --served-model-name flint" when starting the container
+  # (src/application/model/commands/StartModelCommand.ts) and (b) benchmark
+  # with '--served-model-name "flint" --tokenizer "FutureMLS-Lab/..."'
+  # (src/app/api/nodes/.../benchmark/route.ts). Keep this value equal to that
+  # mapping: the launcher flag arrives after this one and argparse keeps the
+  # last occurrence of --served-model-name.
+  #
+  # Benching a server started by hand (no launcher, so only "flint" answers)
+  # must send the tokenizer path explicitly, otherwise it fails with:
+  #   NotFoundError: The model `FutureMLS-Lab/flint-nvfp4-coldgptq` does not
+  #   exist. Valid aliases: flint.
   #   uv run llama-benchy --base-url http://localhost:8000/v1 \
-  #     --model FutureMLS-Lab/flint-nvfp4-coldgptq --pp 2048 --tg 32 \
-  #     --depth 4096 8192 --enable-prefix-caching --concurrency 1 4 \
-  #     --latency-mode generation --format md
-  #   # or omit --model: llama-benchy then auto-detects id + root from
-  #   # /v1/models (verified: "Auto-detected HF model:
-  #   # FutureMLS-Lab/flint-nvfp4-coldgptq (served as: flint)").
+  #     --model FutureMLS-Lab/flint-nvfp4-coldgptq --served-model-name flint \
+  #     --pp 2048 --tg 32 --depth 4096 8192 --enable-prefix-caching \
+  #     --concurrency 1 4 --latency-mode generation --format md
+  # Or omit --model: llama-benchy then auto-detects both served id and
+  # tokenizer root from /v1/models (verified: "Auto-detected HF model:
+  # FutureMLS-Lab/flint-nvfp4-coldgptq (served as: flint)").
   # llama-benchy 0.3.5 has no --exact-tg flag; check the version you are on.
-  served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
+  served_model_name: flint
 
 # Environment variables
 env:
