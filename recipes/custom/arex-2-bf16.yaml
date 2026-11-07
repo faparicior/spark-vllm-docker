@@ -17,7 +17,8 @@
 # DeepSearchQA 93.8. Trained on ML/algorithmic tasks with verifiable
 # feedback; self-improvement behavior transfers to deep research.
 #
-# STATUS (verified Nov-7 on TARS):
+# STATUS (verified Nov-7 on TARS; serves autoregressively with the flags
+# below -- no drafter, see the MTP finding):
 # - Unblock confirmed: the earlier image predating Qwen3.8/GDN support is no
 #   longer the blocker. vllm-node:latest (vllm
 #   0.33.0rc1.dev1016+g06129ab02.d20261107, transformers 5.22.2) resolves the
@@ -49,7 +50,8 @@
 # - Dense model: no --moe-backend and no unquantized-MoE drafter dance
 #   (cf. sage-a1.5-nvfp4 notes).
 # - No speculative decoding by default, because of the missing MTP weights
-#   above. Decode is plain autoregressive. If you want speculation, the only
+#   above. Decode is plain autoregressive, which is the validated path: the
+#   recipe as written was booted on TARS on Nov-7 and served normally. If you want speculation, the only
 #   realistic drafter is the family DFlash2 head trained on the same base and
 #   vocab (248320): download z-lab/Qwen3.8-27B-DFlash2 and append it to the
 #   recipe launch (extra args after -- win over earlier duplicates, so pass
