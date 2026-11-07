@@ -60,15 +60,26 @@ defaults:
   max_model_len: 131072
   max_num_seqs: 8
   max_num_batched_tokens: 8192
-  # Two accepted names: `flint` (what the official vLLM recipe and
-  # recipes.vllm.ai examples use, and what /v1/models + Prometheus
-  # model_name report) and the full HF repo id, which is what benchmark
-  # clients default to when they are pointed at the checkpoint. vLLM accepts
-  # any of them (--served-model-name is a list; the first is used in
-  # responses), so a bench harness that sends
-  # model="FutureMLS-Lab/flint-nvfp4-coldgptq" no longer gets a 404
-  # "does not exist. Valid aliases: flint".
-  served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
+  # Generic alias only: the checkpoint id carries the quantization and the
+  # repackager (FutureMLS-Lab/...-nvfp4-coldgptq), which is noise for clients,
+  # benchmarks and Prometheus metrics. Keep this a single generic token; do
+  # not add the repo id back as a second alias. Verified against the live
+  # server: /v1/models returns id "flint" (root still shows the repo id).
+  #
+  # Benchmarking (vllm/benchmarks/serve.py takes the request "model" from
+  # --model and loads the tokenizer from --tokenizer, falling back to --model
+  # when --tokenizer is omitted):
+  #   vllm bench serve --base-url http://HOST:8000 --backend vllm \
+  #     --model flint --tokenizer FutureMLS-Lab/flint-nvfp4-coldgptq \
+  #     --dataset-name random --random-input-len 1024 --random-output-len 1024
+  # Or omit --model: the bench then reads the first entry of /v1/models
+  # (= flint), so --tokenizer becomes mandatory because "flint" is not a
+  # loadable tokenizer id:
+  #   vllm bench serve --base-url http://HOST:8000 --backend vllm \
+  #     --tokenizer FutureMLS-Lab/flint-nvfp4-coldgptq --dataset-name random
+  # Passing --model FutureMLS-Lab/flint-nvfp4-coldgptq instead fails with
+  # NotFoundError: "does not exist. Valid aliases: flint".
+  served_model_name: flint
 
 # Environment variables
 env:
