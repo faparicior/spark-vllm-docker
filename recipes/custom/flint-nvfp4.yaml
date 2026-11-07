@@ -8,8 +8,21 @@
 # - The container's vLLM must include Flint architecture support
 #   (vllm-project/vllm PR #62938, merged 2026-10-22). This repo's default build
 #   (vllm-node, VLLM_REF=main) provides it. eugr/spark-vllm:latest
-#   (nightly-20261016) predates Flint and CANNOT serve this model; rebuild or
-#   wait for a newer nightly.
+#   (nightly-20261016) predates Flint and CANNOT serve this model; the Nov-6+
+#   vllm-node nightlies do (see STATUS below).
+#
+# STATUS (verified Nov-7 on TARS):
+# - vllm-node:latest (vllm 0.33.0rc1.dev1016+g06129ab02.d20261107) registers
+#   FlintForCausalLM (vllm.models.flint.model) and resolves the checkpoint to
+#   it with quantization=modelopt_fp4 autodetected, so no --quantization flag.
+# - KV cache must stay BF16: FlintAttention asserts
+#   kv_cache_dtype in ("auto", "bfloat16") (vllm/models/flint/model.py:322),
+#   so --kv-cache-dtype fp8 aborts engine startup with a bare AssertionError.
+#   Same constraint as the Ripple recipe, and the official GB200 recipe also
+#   validated BF16 KV. Budget instead: 14 full-attention layers x 4 kv-heads
+#   x 128 head_dim x 2 x 2 B = 28 KB/token (~3.7 GB at 131072 ctx); the 35
+#   sliding-window layers are capped at window 513 (~184 MB/seq at full
+#   window), so BF16 KV is affordable next to ~23.5 GB of weights.
 # - This checkpoint was validated by its author on SGLang/B300, not on vLLM.
 #   Treat this recipe as experimental; the launch flags follow the official vLLM
 #   Flint recipe (recipes.vllm.ai/RecursiveSI/flint) adapted to the ModelOpt path.
@@ -60,8 +73,8 @@ env:
 # The vLLM serve command template.
 # Parsers follow the official Flint recipe: glm47 for both reasoning and tool
 # calls (deepseek_v3 is wrong for Flint: reasoning would stay in content).
-# FP8 KV cache is a DGX Spark memory choice; the official recipe validated
-# BF16 KV on GB200, so drop --kv-cache-dtype fp8 if output quality shifts.
+# No --kv-cache-dtype: Flint only accepts auto/bfloat16 KV (asserted during
+# model construction), so BF16 KV is the only option, not a preference.
 command: |
   vllm serve FutureMLS-Lab/flint-nvfp4-coldgptq \
     --host {host} \
@@ -72,7 +85,6 @@ command: |
     --max-model-len {max_model_len} \
     --max-num-seqs {max_num_seqs} \
     --max-num-batched-tokens {max_num_batched_tokens} \
-    --kv-cache-dtype fp8 \
     --moe-backend marlin \
     --enable-chunked-prefill \
     --async-scheduling \
