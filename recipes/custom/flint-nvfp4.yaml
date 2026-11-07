@@ -60,26 +60,33 @@ defaults:
   max_model_len: 131072
   max_num_seqs: 8
   max_num_batched_tokens: 8192
-  # Generic alias only: the checkpoint id carries the quantization and the
-  # repackager (FutureMLS-Lab/...-nvfp4-coldgptq), which is noise for clients,
-  # benchmarks and Prometheus metrics. Keep this a single generic token; do
-  # not add the repo id back as a second alias. Verified against the live
-  # server: /v1/models returns id "flint" (root still shows the repo id).
+  # Two served names (vLLM --served-model-name takes a list and answers to
+  # any of them):
+  #   1. flint  - the generic client/metrics name, free of the quantization
+  #      and repackager tags of the checkpoint id; this is also what the
+  #      official https://recipes.vllm.ai/RecursiveSI/flint examples use.
+  #   2. the exact HF repo id - required for the sparkrun dashboard, whose
+  #      bench launcher (sparkrun/benchmarking/llama_benchy.py) always passes
+  #      "--model <repo id>" and never "--served-model-name", while
+  #      llama-benchy defaults the request model to --model
+  #      (src/llama_benchy/config.py). Serving only "flint" made that path
+  #      fail with: NotFoundError: The model
+  #      `FutureMLS-Lab/flint-nvfp4-coldgptq` does not exist. Valid aliases:
+  #      flint. Keep both unless that launcher learns to read /v1/models.
   #
-  # Benchmarking (vllm/benchmarks/serve.py takes the request "model" from
-  # --model and loads the tokenizer from --tokenizer, falling back to --model
-  # when --tokenizer is omitted):
-  #   vllm bench serve --base-url http://HOST:8000 --backend vllm \
-  #     --model flint --tokenizer FutureMLS-Lab/flint-nvfp4-coldgptq \
-  #     --dataset-name random --random-input-len 1024 --random-output-len 1024
-  # Or omit --model: the bench then reads the first entry of /v1/models
-  # (= flint), so --tokenizer becomes mandatory because "flint" is not a
-  # loadable tokenizer id:
-  #   vllm bench serve --base-url http://HOST:8000 --backend vllm \
-  #     --tokenizer FutureMLS-Lab/flint-nvfp4-coldgptq --dataset-name random
-  # Passing --model FutureMLS-Lab/flint-nvfp4-coldgptq instead fails with
-  # NotFoundError: "does not exist. Valid aliases: flint".
-  served_model_name: flint
+  # Bench notes (llama-benchy, not vllm bench serve): --model is the HF id
+  # used for the tokenizer, --served-model-name is the name sent in requests.
+  # With both names served, either of these works:
+  #   uv run llama-benchy --base-url http://localhost:8000/v1 \
+  #     --model FutureMLS-Lab/flint-nvfp4-coldgptq --pp 2048 --tg 32 \
+  #     --depth 4096 8192 --enable-prefix-caching --concurrency 1 4 \
+  #     --latency-mode generation --format md
+  #   # or omit --model: llama-benchy then auto-detects id + root from
+  #   # /v1/models (verified: "Auto-detected HF model:
+  #   # FutureMLS-Lab/flint-nvfp4-coldgptq (served as: flint)").
+  # llama-benchy 0.3.5 has no --exact-tg flag; check the version you are on.
+  served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
+  served_model_name: flint FutureMLS-Lab/flint-nvfp4-coldgptq
 
 # Environment variables
 env:
