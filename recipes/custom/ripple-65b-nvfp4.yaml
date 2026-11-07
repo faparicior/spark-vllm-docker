@@ -11,15 +11,17 @@
 # Quality note: Terminal-Bench 2.1 80.5 (beats 501-975B open models), SWE-bench
 # Verified 76.5, SWE-bench Pro v2.0 Hard 79.1. Dense, so all 65B params active.
 #
-# STATUS / BLOCKER (verified Oct-30 on TARS):
+# STATUS (verified Nov-7 on TARS):
 # - vLLM only learned RicursiveForCausalLM with upstream PR #65745, merged
-#   2026-11-05 17:36 UTC. No eugr prebuilt image contains it yet: the newest
-#   tag, eugr/spark-vllm:muse-spark (pushed 2026-11-05 20:47 UTC, vllm
-#   0.1.dev22954+ga34ca64c1), was built hours before the merge. Verified by
-#   inspecting its ModelRegistry: DFlash2DraftModel present, RicursiveForCausalLM
-#   absent. The NEXT eugr nightly (vllm main >= Nov-5 17:36 UTC) will work with
-#   this recipe unchanged. Do not run it on images older than that: the target
-#   arch will simply not be recognized.
+#   2026-11-05 17:36 UTC. The earlier eugr images predate it (eugr/spark-vllm:
+#   muse-spark, vllm 0.1.dev22954, was verified to lack the arch).
+# - Unblock confirmed: vllm-node:latest built Nov-7 (vllm
+#   0.33.0rc1.dev1016+g06129ab02.d20261107) registers RicursiveForCausalLM,
+#   DFlash2RicursiveDraftModel (Ripple-specific draft class, preferred over
+#   the generic DFlash2DraftModel), and ships the ripple reasoning/tool
+#   parsers (vllm/reasoning/ripple_engine_reasoning_parser.py,
+#   vllm/tool_parsers/ripple_engine_tool_parser.py). Any image at or newer
+#   than that nightly works with this recipe unchanged.
 # - Drafters: use ricursiveAI/Ripple-65B-Preview-DFlash2 (DFlash2DraftModel,
 #   4.04B BF16, block_size 16, selector top-k 32 rank 256, taps target layers
 #   1/20/39/58/77). vLLM maps it to qwen3_dflash2 (upstream PR #52816, merged
@@ -55,9 +57,9 @@ description: vLLM serving ricursiveAI/Ripple-65B-Preview-NVFP4 (dense 65B, Model
 model: ricursiveAI/Ripple-65B-Preview-NVFP4
 
 # Requires a vLLM build containing upstream PR #65745 (Ripple support,
-# merged 2026-11-05 17:36 UTC). eugr publishes this stack as spark-vllm
-# nightlies; retag or use -t eugr/spark-vllm:<nightly>=Nov-6+ when testing.
-container: eugr/spark-vllm:latest
+# merged 2026-11-05 17:36 UTC): the standard vllm-node image (eugr prebuilt
+# or repo build) from the Nov-6+ nightlies qualifies; older ones do not.
+container: vllm-node
 
 # ~57 GB of weights + ~8 GB drafter: fits one DGX Spark with KV headroom.
 solo_only: true
