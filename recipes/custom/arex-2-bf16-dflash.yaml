@@ -1,0 +1,109 @@
+# Recipe: AREX-2-BF16-DFlash2
+# Speculative sibling of recipes/custom/arex-2-bf16.yaml: the same BF16
+# BAAI/AREX-2 target (27B dense Qwen3.8-class self-improving agent), but with
+# z-lab/Qwen3.8-27B-DFlash2 as a method=dflash drafter instead of the native
+# MTP head that AREX-2 does not actually ship. Read the STATUS block of
+# arex-2-bf16.yaml first; everything about the target (image requirement,
+# GDN/FlashInfer path, fp8 KV, --language-model-only) carries over unchanged.
+#
+# Why a drafter recipe at all: AREX-2's config.json still declares
+# text_config.mtp_num_hidden_layers = 1 (inherited from Qwen3.8-27B) but BAAI
+# published zero mtp.* tensors, so --speculative-config {"method":"mtp",...}
+# dies while building the Qwen3_5MTP draft head ("Following weights were not
+# initialized from checkpoint"). A DFlash2 head needs no target-side MTP
+# weights: vLLM maps the checkpoint's generic DFlash2DraftModel arch to the
+# qwen3_dflash2 implementation, so speculation is reachable without MTP.
+# z-lab/Qwen3.8-27B-DFlash2 is trained on the same base model and vocabulary
+# (248320) as AREX-2, which is what makes it plausibly compatible.
+#
+# STATUS: UNTESTED (authored Nov-7; the autoregressive base recipe is the
+# validated path). Two things to check when you boot-test it:
+# - It must get past draft-model loading, i.e. no missing-weight error from
+#   the drafter and "Loaded draft model" / CUDA-graph capture to completion.
+# - Acceptance rate: the head was trained on stock Qwen3.8-27B, and AREX's
+#   heavy agentic/ML post-training shifts the output distribution, so
+#   acceptance can be low enough that speculation loses to plain decode.
+#   Compare tokens/s against arex-2-bf16.yaml on your own workload before
+#   keeping this one; if it loses, use the base recipe.
+#
+# Requirements / caveats:
+# - Same image requirement as arex-2-bf16.yaml: a vLLM with qwen3_5_text
+#   (Qwen3.8-class) + GDN linear_attn support. Verified base build:
+#   vllm-node:latest, vllm 0.33.0rc1.dev1016+g06129ab02.d20261107,
+#   transformers 5.22.2.
+# - Recipe --setup/--download-model only fetches `model:` (the target), so the
+#   drafter must be cached explicitly, once, on every node that serves:
+#     ./hf-download.sh z-lab/Qwen3.8-27B-DFlash2
+#     # cluster: ./hf-download.sh z-lab/Qwen3.8-27B-DFlash2 -c --copy-parallel
+#   ~4 GB BF16. vLLM pulls it from the HF cache at startup otherwise, which
+#   needs egress and an HF token for higher rate limits.
+# - Memory on one DGX Spark (128 GB unified): ~54 GB target weights + ~4 GB
+#   BF16 drafter + fp8 KV (~8.5 GB for 262K context over the 16 full-attention
+#   layers) + activations/CUDA graphs; 0.8 utilization leaves room, but
+#   drop --max-model-len if the drafter pushes KV allocation over the limit.
+# - Dense target: no --moe-backend, and nothing to exempt from quantization
+#   (both target and drafter are BF16), unlike the sage-a1.5-nvfp4 dance.
+# - num_speculative_tokens 8 mirrors recipes/qwen3.8-27b-nvfp4-dflash2.yaml
+#   (the same base model). Worth A/B-ing 4/8/12 on agentic traces: higher n
+#   costs a wasted-draft penalty when acceptance drops.
+# - draft_tensor_parallel_size 1 is required here: the recipe is TP=1 solo.
+# - If the drafter misbehaves (garbled output, near-zero acceptance, or a
+#   draft-loading crash), that is the drafter, not the target: the base
+#   recipe serves the same weights fine.
+
+recipe_version: "1"
+name: AREX-2-BF16-DFlash2
+description: vLLM serving BAAI/AREX-2 (27B dense Qwen3.8-class self-improving agent, BF16) on one DGX Spark with the z-lab DFlash2 drafter (untested)
+
+# HuggingFace model to download (optional, for --download-model).
+# The drafter is NOT downloaded by --setup; see the hf-download.sh note above.
+model: BAAI/AREX-2
+
+# Must carry qwen3_5_text + GDN support (Nov-6+ vllm-node nightlies).
+container: vllm-node
+
+cluster_only: false
+
+# Checkpoint ships its own chat template; dense model, no mods.
+mods: []
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_seqs: 8
+  max_num_batched_tokens: 8192
+  num_speculative_tokens: 8
+
+# No special env on purpose; b12x knobs are MoE-only and this model is dense.
+env: {}
+
+# The vLLM serve command template.
+# Identical to arex-2-bf16.yaml plus the DFlash2 --speculative-config, in the
+# same shape as recipes/qwen3.8-27b-nvfp4-dflash2.yaml (method dflash, not
+# mtp: the MTP tensors are absent from this checkpoint).
+command: |
+  vllm serve BAAI/AREX-2 \
+    --host {host} \
+    --port {port} \
+    --tensor-parallel-size {tensor_parallel} \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --language-model-only \
+    --mamba-cache-mode align \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":{num_speculative_tokens},"draft_tensor_parallel_size":1}}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_xml \
+    --enable-auto-tool-choice

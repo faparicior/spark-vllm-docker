@@ -51,19 +51,14 @@
 #   (cf. sage-a1.5-nvfp4 notes).
 # - No speculative decoding by default, because of the missing MTP weights
 #   above. Decode is plain autoregressive, which is the validated path: the
-#   recipe as written was booted on TARS on Nov-7 and served normally. If you want speculation, the only
-#   realistic drafter is the family DFlash2 head trained on the same base and
-#   vocab (248320): download z-lab/Qwen3.8-27B-DFlash2 and append it to the
-#   recipe launch (extra args after -- win over earlier duplicates, so pass
-#   it verbatim):
-#     ./run-recipe.sh recipes/custom/arex-2-bf16.yaml --solo -- \
-#       --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":8,"draft_tensor_parallel_size":1}'
-#   UNTESTED here: the DFlash2 head was trained on stock Qwen3.8-27B, so
-#   AREX's heavy agentic post-training may lower the acceptance rate; A/B the
-#   throughput before keeping it. num_speculative_tokens 8 mirrors
-#   recipes/qwen3.8-27b-nvfp4-dflash2.yaml. Pointing method=mtp at the base
-#   repo's mtp.* head is not recommended: the draft head would come from a
-#   differently-tuned (and NVFP4-quantized) model.
+#   recipe as written was booted on TARS on Nov-7 and served normally.
+#   Speculation lives in the sibling recipes/custom/arex-2-bf16-dflash.yaml,
+#   which serves these weights with z-lab/Qwen3.8-27B-DFlash2 as a
+#   method=dflash drafter (same base model and vocab 248320; needs the
+#   drafter cached with ./hf-download.sh and is still UNTESTED). Prefer it
+#   over hand-appending --speculative-config here. Pointing method=mtp at the
+#   base repo's mtp.* head is not recommended: the draft head would come from
+#   a differently-tuned (and NVFP4-quantized) model.
 # - KV is cheap because only 16/64 layers are full attention: 16 x 4 kv heads
 #   x 256 head_dim x 2 x 2 B = ~64 KB/token BF16, ~32 KB with --kv-cache-dtype
 #   fp8 (keep it; the qwen3.8 sisters use fp8 KV). Linear_attn state is
