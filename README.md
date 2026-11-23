@@ -42,6 +42,10 @@ If you want to build only the runner from precompiled vLLM and FlashInfer wheels
 
 Similarly, `--rebuild-flashinfer`, `--flashinfer-ref`, and `--apply-flashinfer-pr` control the FlashInfer build and force the local build path.
 
+Source builds include FlashInfer's [cuDNN Frontend 1.33 output fix](https://github.com/flashinfer-ai/flashinfer/pull/9765)
+and lift vLLM's [temporary frontend cap](https://github.com/vllm-project/vllm/pull/68566)
+before building the vLLM wheel.
+
 Local builds include a CUDA-on-WSL memory-reporting fix in both compiled vLLM
 wheels and runners built with `--use-wheels`. On integrated NVIDIA GPUs under
 WSL, vLLM keeps CUDA's reported free memory instead of replacing it with guest
@@ -676,6 +680,13 @@ The default policy is conservative and absolute-memory based: `-M 524288,102400 
 #### Build and runtime compatibility updates
 
 `--gpu-arch` now also drives the NCCL `NVCC_GENCODE` build argument, so non-default local builds compile NCCL for the same target architecture as Torch and FlashInfer.
+
+For a multi-target vLLM source build, the builder resolves each kernel's supported
+architectures separately for each requested GPU and combines the resulting compiler
+targets. With `--gpu-arch '10.3a 12.0a 12.1a'`, this preserves the native Spark
+and RTX Pro variants of SM12x CUTLASS kernels alongside Station's SM10x kernels.
+FlashInfer also builds providers for the requested targets. At inference time it
+detects the GPUs visible to the process and selects the matching providers.
 
 The source-build KV-cache cleanup is now embedded directly in the Dockerfile, while `mods/kv-cache-prealloc-cleanup` keeps only the runtime policy tweaks.
 
@@ -1989,7 +2000,7 @@ builds use PyTorch 2.14.0 and torchvision 0.29.0. Both use torchaudio 2.11.0.
 | :--- | :--- |
 | `-t, --tag <tag>` | Local image tag (default: `vllm-node`; auto-set to `vllm-node-tf5` with `--tf5`, `vllm-node-mxfp4` with `--exp-mxfp4`, or `vllm-node-b12x` with `--exp-b12x`) |
 | `--use-wheels` | Build only the runner image from downloaded or local precompiled wheels; never implicitly compile missing wheels. Incompatible with `--exp-b12x`. |
-| `--gpu-arch <arch>` | Target GPU architecture for wheel/source builds. Non-default targets rebuild FlashInfer unless the local cache is marked for that architecture. The default `12.1a` still uses the prebuilt image unless another build-forcing flag is set. |
+| `--gpu-arch '<arch> ...'` | Target GPU architectures for wheel/source builds. Pass a quoted space-separated list such as `'10.3a 12.0a 12.1a'` for one ARM64 image supporting DGX Station, RTX Pro 6000 Blackwell and DGX Spark. Non-default targets rebuild FlashInfer unless the local cache matches the list. The default `12.1a` uses the prebuilt image unless another build-forcing flag is set. |
 | `--rebuild-flashinfer` | Skip prebuilt wheel download; force a fresh local FlashInfer build |
 | `--rebuild-vllm` | Force rebuild vLLM from source |
 | `--force-flashinfer-download` | Force download upstream FlashInfer wheels, skipping cached wheel checks; unsupported for B12X |
@@ -2421,7 +2432,7 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **fix-Salyut1-GLM-4.7-NVFP4/**: Fixes the GLM4MoE parser for Salyut1/GLM-4.7-NVFP4 fused QKV quantization.
 - **fix-glm-4.7-flash-AWQ/**: Applies GLM-4.7-Flash-AWQ compatibility and performance fixes.
 - **fix-qwen3.5-chat-template/** and **fix-qwen3.6-chat-template/**: Install fixed chat templates used by the Qwen3.5 and Qwen3.6 recipes.
-- **fix-qwen3.5-autoround/**, **fix-qwen3-next-autoround/**, and **fix-qwen35-tp4-marlin/**: Model-specific Qwen AutoRound and Marlin compatibility fixes.
+- **fix-qwen3.5-autoround/** and **fix-qwen35-tp4-marlin/**: Model-specific Qwen AutoRound and Marlin compatibility fixes. The Intel Qwen3-Coder-Next AutoRound recipe uses vLLM's built-in INC router support.
 - **fix-qwen3-coder-next/**: Qwen3-Coder-Next runtime and performance fixes.
 - **radixark-dspark/**: Routes Qwen DSpark checkpoints such as `RadixArk/Qwen3.8-27B-DSpark` to vLLM's Qwen3 DSpark loader instead of the DeepSeek-V4 loader.
 - **dspark-instanttensor/**: Filters embedded `mtp.*` DSpark draft weights before InstantTensor or safetensors I/O, preventing a second full-checkpoint load.
